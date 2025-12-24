@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Magic Tree - Cinema Light</title>
+    <title>Magic Tree - Fast Loading</title>
     <style>
         body { 
             margin: 0; overflow: hidden; background-color: #000; 
@@ -98,10 +98,26 @@
         @keyframes pulse-music { 0% {box-shadow: 0 0 0 0 rgba(255,0,68,0.4);} 70% {box-shadow: 0 0 0 10px rgba(255,0,68,0);} 100% {box-shadow: 0 0 0 0 rgba(255,0,68,0);} }
 
         #file-input { display: none; }
+        
+        /* 优化的加载屏幕 */
         #loading {
-            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            color: #d4af37; font-size: 1rem; letter-spacing: 4px; z-index: 10; 
-            pointer-events: none; transition: opacity 0.5s; font-weight: 300;
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: #000; z-index: 50;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            transition: opacity 0.8s ease;
+        }
+        #loading.fade-out { opacity: 0; pointer-events: none; }
+        
+        .loading-text {
+            color: #d4af37; font-size: 1.2rem; letter-spacing: 6px; margin-bottom: 20px;
+            text-transform: uppercase; font-weight: 300;
+        }
+        .progress-bar-container {
+            width: 200px; height: 2px; background: rgba(255,255,255,0.2); border-radius: 2px; overflow: hidden;
+        }
+        #progress-bar {
+            width: 0%; height: 100%; background: #d4af37; transition: width 0.2s;
+            box-shadow: 0 0 10px #d4af37;
         }
 
         .hide-ui #ui-layer, .hide-ui #video-container { opacity: 0; pointer-events: none; }
@@ -128,6 +144,13 @@
     <div id="canvas-wrapper">
         <div id="canvas-container"></div>
         
+        <div id="loading">
+            <div class="loading-text" id="loading-text">LOADING MAGIC...</div>
+            <div class="progress-bar-container">
+                <div id="progress-bar"></div>
+            </div>
+        </div>
+        
         <div id="video-container">
             <video id="input-video" autoplay playsinline muted></video>
             <canvas id="skeleton-canvas"></canvas>
@@ -151,7 +174,6 @@
             </div>
             <input type="file" id="file-input" multiple accept="image/*">
         </div>
-        <div id="loading">CRAFTING MAGIC...</div>
     </div>
 
     <script type="module">
@@ -183,7 +205,8 @@
 
         const CONFIG = {
             goldCount: 600, silverCount: 600, gemCount: 300, emeraldCount: 300, dustCount: 1500,
-            treeHeight: 80, maxRadius: 35, camDistance: 110
+            treeHeight: 80, maxRadius: 35, camDistance: 110,
+            maxAutoLoadPhotos: 5 // 限制自动加载的照片数量，防止无限404
         };
 
         const STATE = { TREE: 'tree', SCATTER: 'scatter', ZOOM: 'zoom' };
@@ -191,7 +214,6 @@
         
         let scene, camera, renderer, composer, bloomPass;
         let mainGroup = new THREE.Group();
-        let cameraLight; // 新增：绑定相机的补光灯
         let mats = {}; 
         let goldMesh, silverMesh, gemMesh, emeraldMesh, dustSystem, spiralSystem;
         let photoMeshes = [];
@@ -212,6 +234,7 @@
         let activePhotoIndex = -1;
         let isPinchingLocked = false;
         let isMusicPlaying = false;
+        let loadingManager; // 加载管理器
 
         // --- UI & Logic ---
         window.toggleUI = function() {
@@ -245,27 +268,21 @@
         };
 
         function applyTheme() {
-            // 调整发光强度，使其在新的辉光阈值下依然明亮
             mats.gold.color.setHex(currentTheme.gold);
             mats.gold.emissive.setHex(currentTheme === THEMES.CLASSIC ? 0xaa5500 : 0x004488);
-            
             mats.gem.color.setHex(currentTheme.gem);
             mats.gem.emissive.setHex(currentTheme === THEMES.CLASSIC ? 0x550011 : 0x004455);
-            
             mats.emerald.color.setHex(currentTheme.emerald);
             dustSystem.material.color.setHex(currentTheme.dust);
             if(spiralSystem) spiralSystem.material.color.setHex(currentTheme.spiral);
-
             scene.background.setHex(currentTheme.bg);
             scene.fog.color.setHex(currentTheme.fog);
-
             document.documentElement.style.setProperty('--highlight-color', currentTheme.uiColor);
             document.querySelector('.instructions').style.borderLeftColor = currentTheme.uiColor;
             document.querySelectorAll('.highlight').forEach(el => el.style.color = currentTheme.uiColor);
             document.getElementById('main-title').style.background = currentTheme.titleGrad;
             document.getElementById('main-title').style.webkitBackgroundClip = 'text';
             document.getElementById('main-title').style.webkitTextFillColor = 'transparent';
-            
             const fsBtn = document.getElementById('fullscreen-btn');
             fsBtn.style.color = currentTheme.uiColor;
             fsBtn.style.borderColor = currentTheme.uiColor;
@@ -281,6 +298,25 @@
             const wrapper = document.getElementById('canvas-wrapper');
             const container = document.getElementById('canvas-container');
             
+            // --- 1. 配置加载管理器 (进度条逻辑) ---
+            loadingManager = new THREE.LoadingManager();
+            
+            loadingManager.onProgress = function (url, itemsLoaded, itemsTotal) {
+                const percent = Math.floor((itemsLoaded / itemsTotal) * 100);
+                document.getElementById('progress-bar').style.width = percent + '%';
+                // 可选：显示具体加载百分比
+                // document.getElementById('loading-text').innerText = `LOADING ${percent}%`;
+            };
+
+            loadingManager.onLoad = function () {
+                console.log('All assets loaded.');
+                // 延迟一点点隐藏，让用户看到100%
+                setTimeout(() => {
+                    document.getElementById('loading').classList.add('fade-out');
+                    updateStatus("系统就绪，请伸手", "#0f0");
+                }, 500);
+            };
+
             scene = new THREE.Scene();
             scene.background = new THREE.Color(currentTheme.bg); 
             scene.fog = new THREE.FogExp2(currentTheme.bg, 0.002);
@@ -290,8 +326,7 @@
             camera = new THREE.PerspectiveCamera(50, wrapper.clientWidth / wrapper.clientHeight, 0.1, 1000);
             camera.position.set(0, 0, CONFIG.camDistance);
             
-            // 添加一个绑定在相机上的灯，确保照片始终可见
-            cameraLight = new THREE.DirectionalLight(0xffffff, 0.5);
+            const cameraLight = new THREE.DirectionalLight(0xffffff, 0.5);
             cameraLight.position.set(0, 0, 1);
             camera.add(cameraLight);
             scene.add(camera);
@@ -300,13 +335,13 @@
             renderer.setSize(wrapper.clientWidth, wrapper.clientHeight);
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); 
             renderer.toneMapping = THREE.ACESFilmicToneMapping;
-            renderer.toneMappingExposure = 0.9; // 稍微降低整体曝光
+            renderer.toneMappingExposure = 0.9; 
             container.appendChild(renderer.domElement);
 
             const pmremGenerator = new THREE.PMREMGenerator(renderer);
             scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
 
-            const ambientLight = new THREE.AmbientLight(0xffffff, 0.3); // 提高一点环境光
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.3); 
             scene.add(ambientLight);
             const spotLight = new THREE.SpotLight(0xffffff, 80);
             spotLight.position.set(20, 100, 50);
@@ -314,9 +349,8 @@
             scene.add(spotLight);
             
             const renderScene = new RenderPass(scene, camera);
-            // 提高 bloom 阈值，防止照片过曝
             bloomPass = new UnrealBloomPass(new THREE.Vector2(wrapper.clientWidth, wrapper.clientHeight), 1.5, 0.4, 0.85);
-            bloomPass.threshold = 0.5; // 重要修改：只让真正亮的东西发光
+            bloomPass.threshold = 0.5; 
             bloomPass.strength = 1.0; 
             bloomPass.radius = 0.5;
 
@@ -329,7 +363,8 @@
             createStarField();
             createParticleSpirals();
             
-            loadNextLocalPhoto(1);
+            // --- 2. 启动并发加载 ---
+            preloadLocalAssetsInParallel();
 
             scene.add(mainGroup);
             window.addEventListener('resize', onWindowResize);
@@ -337,25 +372,31 @@
             applyTheme();
         }
 
-        function loadNextLocalPhoto(index) {
-            const path = `assets/${index}.jpg`; 
-            const loader = new THREE.TextureLoader();
-            loader.load(path, (tex) => {
-                addPhotoMesh(tex.image);
-                updateStatus(`已自动加载: 第 ${index} 张`, currentTheme.uiColor);
-                loadNextLocalPhoto(index + 1);
-            }, undefined, (err) => {
-                if (index === 1) {
-                    if (window.location.protocol === 'file:') {
-                         updateStatus("请使用 Live Server 或手动上传", "#ff0044");
-                         alert("安全提示：浏览器禁止直接读取本地文件。\n请使用 'Live Server' 或手动上传。");
-                    } else {
-                         updateStatus("未找到本地照片，请手动上传", "#aaa");
+        // --- 核心优化：并发加载 ---
+        function preloadLocalAssetsInParallel() {
+            // 使用我们配置好的 manager
+            const loader = new THREE.TextureLoader(loadingManager);
+            
+            // 假设我们只预加载前 N 张，防止 404 太多影响性能
+            // 如果你想加载更多，修改 CONFIG.maxAutoLoadPhotos
+            for(let i=1; i<=CONFIG.maxAutoLoadPhotos; i++) {
+                const path = `./assets/${i}.jpg`; 
+                
+                // 并发请求：不等待，直接循环发起
+                loader.load(
+                    path,
+                    (tex) => {
+                        // 加载成功一张，就创建一张
+                        addPhotoMesh(tex.image);
+                        console.log(`Loaded ${path}`);
+                    },
+                    undefined,
+                    (err) => {
+                        // 忽略 404 错误，这很正常（用户可能只有3张照片）
+                        // 也不需要 console.error 刷屏
                     }
-                } else {
-                    updateStatus(`相册就绪: 共 ${index - 1} 张`, "#0f0");
-                }
-            });
+                );
+            }
         }
 
         function updateDimensions() {
@@ -376,7 +417,6 @@
         }
 
         function createMaterialsAndMeshes() {
-            // 增加自发光强度，适应更高的 bloom 阈值
             mats.gold = new THREE.MeshPhysicalMaterial({ color: currentTheme.gold, metalness: 1.0, roughness: 0.15, clearcoat: 1.0, emissive: 0xaa5500, emissiveIntensity: 0.8 });
             mats.silver = new THREE.MeshPhysicalMaterial({ color: currentTheme.silver, metalness: 0.9, roughness: 0.2, clearcoat: 1.0 });
             mats.gem = new THREE.MeshPhysicalMaterial({ color: currentTheme.gem, metalness: 0.1, roughness: 0.0, transmission: 0.6, thickness: 1.5, emissive: 0x550011, emissiveIntensity: 1.2 });
@@ -697,13 +737,14 @@
                 video.srcObject = stream;
                 
                 video.addEventListener("loadeddata", () => {
-                    document.getElementById('loading').style.display = 'none';
-                    updateStatus("系统就绪", currentTheme.uiColor);
+                    // 不需要在这里隐藏 loading，交给 LoadingManager 处理
+                    updateStatus("手势识别就绪", currentTheme.uiColor);
                     predictWebcam(handLandmarker, video);
                 });
             } catch (error) {
                 console.error(error);
-                document.getElementById('loading').innerText = "Camera Error";
+                // 如果摄像头失败，也隐藏 loading，否则卡死
+                document.getElementById('loading').classList.add('fade-out');
                 updateStatus("摄像头访问失败", "#f00");
             }
         }
@@ -832,19 +873,16 @@
 
             const geo = new THREE.PlaneGeometry(w, h);
             
-            // 核心修复：防止照片过曝
-            // 使用 Standard 材质 + 灰色滤镜，并配合相机灯光
             const mat = new THREE.MeshStandardMaterial({ 
                 map: tex, 
                 side: THREE.DoubleSide,
                 roughness: 0.8,
                 metalness: 0.1,
-                color: 0xaaaaaa // 压暗亮度，防止辉光过曝
+                color: 0xaaaaaa 
             });
 
             const mesh = new THREE.Mesh(geo, mat);
             
-            // 相框保持高亮
             const frame = new THREE.Mesh(new THREE.BoxGeometry(w+0.2, h+0.2, 0.1), new THREE.MeshPhysicalMaterial({
                 color: currentTheme.gold, 
                 roughness: 0.2, 
