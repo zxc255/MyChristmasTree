@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Magic Tree - Offline Model</title>
+    <title>Magic Tree - Fully Local</title>
     <style>
         body { 
             margin: 0; overflow: hidden; background-color: #000; 
@@ -182,7 +182,6 @@
         import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
         import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
         
-        // 引用 MediaPipe bundle
         import { FilesetResolver, HandLandmarker } from 'https://unpkg.com/@mediapipe/tasks-vision@0.10.0/vision_bundle.js';
 
         const THEMES = {
@@ -305,7 +304,7 @@
                 console.log('All assets loaded.');
                 setTimeout(() => {
                     document.getElementById('loading').classList.add('fade-out');
-                    updateStatus("系统就绪，请伸手", "#0f0");
+                    // 此时只更新状态，不依赖手势，手势由 setupMediaPipe 独立更新
                 }, 500);
             };
 
@@ -367,17 +366,10 @@
             const loader = new THREE.TextureLoader(loadingManager);
             for(let i=1; i<=CONFIG.maxAutoLoadPhotos; i++) {
                 const path = `assets/${i}.jpg`; 
-                loader.load(
-                    path,
-                    (tex) => {
-                        addPhotoMesh(tex.image);
-                        console.log(`Loaded ${path}`);
-                    },
-                    undefined,
-                    (err) => {
-                        // 忽略 404
-                    }
-                );
+                loader.load(path, (tex) => {
+                    addPhotoMesh(tex.image);
+                    console.log(`Loaded ${path}`);
+                }, undefined, (err) => {});
             }
         }
 
@@ -564,7 +556,6 @@
             if (currentState === STATE.ZOOM) {
                 const currentY = mainGroup.rotation.y;
                 let delta = (targetGroupRotationY - currentY) % (2 * Math.PI);
-                
                 if (delta > Math.PI) delta -= 2 * Math.PI;
                 if (delta < -Math.PI) delta += 2 * Math.PI;
 
@@ -576,10 +567,8 @@
                     const speed = Math.abs(delta);
                     warpFactor = THREE.MathUtils.lerp(warpFactor, speed * 2.5, 0.1); 
                 }
-
             } else if (currentState === STATE.SCATTER) {
                 warpFactor = THREE.MathUtils.lerp(warpFactor, 0, 0.1); 
-
                 if (isHandPresent) {
                     const deltaX = handPos.x - lastHandPos.x;
                     const deltaY = handPos.y - lastHandPos.y;
@@ -601,12 +590,10 @@
         function updateMeshLogic(mesh, dataArray) {
             const isZoom = currentState === STATE.ZOOM;
             const isTree = currentState === STATE.TREE;
-
             for (let i = 0; i < dataArray.length; i++) {
                 const item = dataArray[i];
                 let target = isTree ? item.treePos : item.scatterPos;
                 if(isZoom) target = item.scatterPos; 
-
                 if (warpFactor > 0.01) {
                     _tempVec3.copy(target).multiplyScalar(1 + warpFactor * 0.5); 
                     item.currentPos.lerp(_tempVec3, 0.1);
@@ -614,13 +601,10 @@
                     if (!isTree) item.currentPos.y += Math.sin(time + i * 0.1) * 0.01;
                     item.currentPos.lerp(target, 0.08);
                 }
-
                 item.rotation.x += item.rotSpeed.x;
                 item.rotation.y += item.rotSpeed.y;
-
                 let s = item.scale;
                 if(isZoom) s *= 0.6; 
-
                 dummy.position.copy(item.currentPos);
                 dummy.rotation.copy(item.rotation);
                 dummy.scale.setScalar(s);
@@ -633,10 +617,8 @@
         function updateDustLogic() {
             const positions = dustSystem.geometry.attributes.position.array;
             const isTree = currentState === STATE.TREE;
-            
             for(let i=0; i<logicData.dust.length; i++) {
                 const item = logicData.dust[i];
-                
                 if (isTree) {
                     item.currentPos.y += item.velocity;
                     const rMax = CONFIG.maxRadius * (1 - (item.currentPos.y + CONFIG.treeHeight/2)/CONFIG.treeHeight) + 4;
@@ -665,17 +647,14 @@
 
         function updatePhotoLogic() {
             const VIEW_DISTANCE = 50; 
-
             photoMeshes.forEach((mesh, idx) => {
                 let targetPos, targetScale;
                 const isActive = (currentState === STATE.ZOOM && idx === activePhotoIndex);
-
                 if (isActive) {
                     const originalPos = mesh.userData.scatterPos;
                     const flatDist = Math.sqrt(originalPos.x * originalPos.x + originalPos.z * originalPos.z);
                     const normX = originalPos.x / flatDist;
                     const normZ = originalPos.z / flatDist;
-
                     targetPos = new THREE.Vector3(normX * VIEW_DISTANCE, 0, normZ * VIEW_DISTANCE);
                     targetScale = 6.0; 
                     mesh.lookAt(camera.position); 
@@ -691,13 +670,11 @@
                         mesh.lookAt(camera.position);
                     }
                 }
-                
                 if (warpFactor > 0.1 && !isActive) {
                      mesh.position.lerp(targetPos.clone().multiplyScalar(1.2), 0.1);
                 } else {
                      mesh.position.lerp(targetPos, 0.08);
                 }
-                
                 const currentScale = mesh.scale.x;
                 mesh.scale.setScalar(THREE.MathUtils.lerp(currentScale, targetScale, 0.08));
             });
@@ -705,11 +682,13 @@
 
         async function setupMediaPipe() {
             try {
-                const vision = await FilesetResolver.forVisionTasks("https://unpkg.com/@mediapipe/tasks-vision@0.10.0/wasm");
-                // 关键修改 4: 引用本地 task 文件，不带斜杠开头
+                // 关键修改：告诉 MediaPipe 的 JS 库，WASM 核心文件也在本地的 ./assets 目录下
+                const vision = await FilesetResolver.forVisionTasks("./assets");
+                
                 const handLandmarker = await HandLandmarker.createFromOptions(vision, {
                     baseOptions: {
-                        modelAssetPath: `assets/hand_landmarker.task`, 
+                        // 关键修改：加载本地的 AI 模型文件
+                        modelAssetPath: `assets/hand_landmarker.task`,
                         delegate: "GPU"
                     },
                     runningMode: "VIDEO", numHands: 1
@@ -726,8 +705,8 @@
             } catch (error) {
                 console.error(error);
                 document.getElementById('loading').classList.add('fade-out');
-                updateStatus("摄像头访问失败或模型加载错误", "#f00");
-                alert("如果看到此错误，请确认 assets/hand_landmarker.task 文件是否存在。");
+                updateStatus("请确保 assets 下有 wasm/js/task 文件", "#f00");
+                alert("AI 引擎加载失败。请确保你已下载了 vision_wasm_internal.wasm, vision_wasm_internal.js 和 hand_landmarker.task 并放在 assets 文件夹中。");
             }
         }
 
@@ -792,15 +771,11 @@
                 if (!isPinchingLocked) { 
                     if (photoMeshes.length > 0) {
                         currentState = STATE.ZOOM; 
-                        
                         activePhotoIndex = (activePhotoIndex + 1) % photoMeshes.length;
-                        
                         const targetMesh = photoMeshes[activePhotoIndex];
                         const pos = targetMesh.userData.scatterPos;
-                        
                         const angleOffset = Math.atan2(pos.x, pos.z);
                         targetGroupRotationY = -angleOffset;
-                        
                         updateStatus(`Viewing Photo ${activePhotoIndex + 1} / ${photoMeshes.length}`, currentTheme.uiColor);
                     } else {
                         updateStatus("相册为空", "#aaa");
@@ -854,23 +829,12 @@
             if(img.width > img.height) h = 4 * (img.height/img.width); else w = 4 * (img.width/img.height);
 
             const geo = new THREE.PlaneGeometry(w, h);
-            
             const mat = new THREE.MeshStandardMaterial({ 
-                map: tex, 
-                side: THREE.DoubleSide,
-                roughness: 0.8,
-                metalness: 0.1,
-                color: 0xaaaaaa 
+                map: tex, side: THREE.DoubleSide, roughness: 0.8, metalness: 0.1, color: 0xaaaaaa 
             });
-
             const mesh = new THREE.Mesh(geo, mat);
-            
             const frame = new THREE.Mesh(new THREE.BoxGeometry(w+0.2, h+0.2, 0.1), new THREE.MeshPhysicalMaterial({
-                color: currentTheme.gold, 
-                roughness: 0.2, 
-                metalness: 1.0, 
-                emissive: 0xaa5500, 
-                emissiveIntensity: 0.5
+                color: currentTheme.gold, roughness: 0.2, metalness: 1.0, emissive: 0xaa5500, emissiveIntensity: 0.5
             }));
             frame.position.z = -0.06; mesh.add(frame);
 
@@ -879,7 +843,6 @@
             const curveR = Math.pow(1-normH, 0.8) * CONFIG.maxRadius + 2; 
             const r = curveR + Math.random() * 5;
             const theta = Math.random() * Math.PI * 2;
-            
             const treePos = new THREE.Vector3(r * Math.cos(theta), h_pos, r * Math.sin(theta));
             mesh.userData = { 
                 treePos, scatterPos: randomSpherePoint(60), 
